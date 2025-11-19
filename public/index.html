@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小宇宙一起听</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center; background: #f5f5f5; }
+        input { width: 70%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        button { padding: 10px 20px; background: #ff5c5c; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        #player-container { margin-top: 30px; display: none; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        img { width: 150px; border-radius: 10px; margin-bottom: 20px; }
+        audio { width: 100%; margin-top: 20px; }
+        .status { color: #888; font-size: 12px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h2>📻 小宇宙一起听</h2>
+    <div>
+        <input type="text" id="urlInput" placeholder="粘贴小宇宙单集链接 (https://...)">
+        <button onclick="parseUrl()">加载</button>
+    </div>
+
+    <div id="player-container">
+        <img id="cover" src="" alt="Cover">
+        <h3 id="title">博客标题</h3>
+        <audio id="audioPlayer" controls></audio>
+        <p class="status">状态: <span id="syncStatus">等待操作...</span></p>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const audio = document.getElementById('audioPlayer');
+        let isRemoteUpdate = false; // 防止死循环的关键标志位
+
+        // 1. 解析 URL
+        async function parseUrl() {
+            const url = document.getElementById('urlInput').value;
+            if(!url) return alert('请输入链接');
+            
+            const res = await fetch('/api/parse', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+            
+            if(data.success) {
+                // 通知服务器，我们换歌了
+                socket.emit('new_track', data);
+            } else {
+                alert('解析失败: ' + data.message);
+            }
+        }
+
+        // 2. 监听换歌事件 (来自服务器)
+        socket.on('sync_track', (data) => {
+            document.getElementById('player-container').style.display = 'block';
+            document.getElementById('title').innerText = data.title;
+            document.getElementById('cover').src = data.cover;
+            
+            // 只有当链接不同时才重载，避免打断
+            if(audio.src !== data.audioUrl) {
+                audio.src = data.audioUrl;
+                // ⚠️ 注意：现代浏览器通常禁止自动播放音频，需要用户至少交互一次
+            }
+        });
+
+        // 3. 监听同步事件 (来自对方)
+        socket.on('sync_action', (data) => {
+            isRemoteUpdate = true; // 标记为远程更新，防止再次触发发送
+            const diff = Math.abs(audio.currentTime - data.time);
+
+            document.getElementById('syncStatus').innerText = `同步中: ${data.type}`;
+
+            // 如果时间差超过 2 秒，强制同步时间
+            if (diff > 2) {
+                audio.currentTime = data.time;
+            }
+
+            if (data.type === 'play') {
+                audio.play().catch(e => console.log('Autoplay blocked', e));
+            } else if (data.type === 'pause') {
+                audio.pause();
+            }
+            
+            // 给一点缓冲时间重置标志位
+            setTimeout(() => { isRemoteUpdate = false; }, 500);
+        });
+
+        // 4. 绑定播放器事件，发送给对方
+        audio.addEventListener('play', () => {
+            if (!isRemoteUpdate) socket.emit('player_action', { type: 'play', time: audio.currentTime });
+        });
+
+        audio.addEventListener('pause', () => {
+            if (!isRemoteUpdate) socket.emit('player_action', { type: 'pause', time: audio.currentTime });
+        });
+
+        audio.addEventListener('seeked', () => { // 拖动进度条结束
+            if (!isRemoteUpdate) socket.emit('player_action', { type: 'seek', time: audio.currentTime });
+        });
+
+    </script>
+</body>
+</html>
